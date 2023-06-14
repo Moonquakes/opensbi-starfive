@@ -18,14 +18,16 @@
 #include <sbi/sbi_hartmask.h>
 #include <sbi/sbi_hsm.h>
 #include <sbi/sbi_ipi.h>
-#include <sbi/sbi_irqchip.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_system.h>
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_tlb.h>
+#include <sbi/sbi_pmp.h>
 #include <sbi/sbi_version.h>
+#include <sm/sm.h>
+#include <sm/attest.h>
 
 #define BANNER                                              \
 	"   ____                    _____ ____ _____\n"     \
@@ -43,9 +45,9 @@ static void sbi_boot_print_banner(struct sbi_scratch *scratch)
 		return;
 
 #ifdef OPENSBI_VERSION_GIT
-	sbi_printf("\nOpenSBI %s\n", OPENSBI_VERSION_GIT);
+	sbi_printf("\nOpenSBI %s (with Penglai TEE)\n", OPENSBI_VERSION_GIT);
 #else
-	sbi_printf("\nOpenSBI v%d.%d\n", OPENSBI_VERSION_MAJOR,
+	sbi_printf("\nOpenSBI v%d.%d (with Penglai TEE v3)\n", OPENSBI_VERSION_MAJOR,
 		   OPENSBI_VERSION_MINOR);
 #endif
 
@@ -63,13 +65,11 @@ static void sbi_boot_print_banner(struct sbi_scratch *scratch)
 static void sbi_boot_print_general(struct sbi_scratch *scratch)
 {
 	char str[128];
-	const struct sbi_pmu_device *pdev;
 	const struct sbi_hsm_device *hdev;
 	const struct sbi_ipi_device *idev;
 	const struct sbi_timer_device *tdev;
 	const struct sbi_console_device *cdev;
 	const struct sbi_system_reset_device *srdev;
-	const struct sbi_system_suspend_device *susp_dev;
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
 	if (scratch->options & SBI_SCRATCH_NO_BOOT_PRINTS)
@@ -95,24 +95,17 @@ static void sbi_boot_print_general(struct sbi_scratch *scratch)
 	hdev = sbi_hsm_get_device();
 	sbi_printf("Platform HSM Device       : %s\n",
 		   (hdev) ? hdev->name : "---");
-	pdev = sbi_pmu_get_device();
-	sbi_printf("Platform PMU Device       : %s\n",
-		   (pdev) ? pdev->name : "---");
 	srdev = sbi_system_reset_get_device(SBI_SRST_RESET_TYPE_COLD_REBOOT, 0);
 	sbi_printf("Platform Reboot Device    : %s\n",
 		   (srdev) ? srdev->name : "---");
 	srdev = sbi_system_reset_get_device(SBI_SRST_RESET_TYPE_SHUTDOWN, 0);
 	sbi_printf("Platform Shutdown Device  : %s\n",
 		   (srdev) ? srdev->name : "---");
-	susp_dev = sbi_system_suspend_get_device();
-	sbi_printf("Platform Suspend Device   : %s\n",
-		   (susp_dev) ? susp_dev->name : "---");
 
 	/* Firmware details */
 	sbi_printf("Firmware Base             : 0x%lx\n", scratch->fw_start);
 	sbi_printf("Firmware Size             : %d KB\n",
 		   (u32)(scratch->fw_size / 1024));
-	sbi_printf("Firmware RW Offset        : 0x%lx\n", scratch->fw_rw_offset);
 
 	/* SBI details */
 	sbi_printf("Runtime SBI Version       : %d.%d\n",
@@ -148,12 +141,10 @@ static void sbi_boot_print_hart(struct sbi_scratch *scratch, u32 hartid)
 	/* Boot HART details */
 	sbi_printf("Boot HART ID              : %u\n", hartid);
 	sbi_printf("Boot HART Domain          : %s\n", dom->name);
-	sbi_hart_get_priv_version_str(scratch, str, sizeof(str));
-	sbi_printf("Boot HART Priv Version    : %s\n", str);
 	misa_string(xlen, str, sizeof(str));
-	sbi_printf("Boot HART Base ISA        : %s\n", str);
-	sbi_hart_get_extensions_str(scratch, str, sizeof(str));
-	sbi_printf("Boot HART ISA Extensions  : %s\n", str);
+	sbi_printf("Boot HART ISA             : %s\n", str);
+	sbi_hart_get_features_str(scratch, str, sizeof(str));
+	sbi_printf("Boot HART Features        : %s\n", str);
 	sbi_printf("Boot HART PMP Count       : %d\n",
 		   sbi_hart_pmp_count(scratch));
 	sbi_printf("Boot HART PMP Granularity : %lu\n",
@@ -177,8 +168,8 @@ static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	/* Save MIE CSR */
 	saved_mie = csr_read(CSR_MIE);
 
-	/* Set MSIE and MEIE bits to receive IPI */
-	csr_set(CSR_MIE, MIP_MSIP | MIP_MEIP);
+	/* Set MSIE bit to receive IPI */
+	csr_set(CSR_MIE, MIP_MSIP);
 
 	/* Acquire coldboot lock */
 	spin_lock(&coldboot_lock);
@@ -194,7 +185,7 @@ static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
 		do {
 			wfi();
 			cmip = csr_read(CSR_MIP);
-		 } while (!(cmip & (MIP_MSIP | MIP_MEIP)));
+		 } while (!(cmip & MIP_MSIP));
 	};
 
 	/* Acquire coldboot lock */
@@ -260,15 +251,15 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	if (!init_count_offset)
 		sbi_hart_hang();
 
-	rc = sbi_hsm_init(scratch, hartid, true);
+	rc = sbi_hsm_init(scratch, hartid, TRUE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_platform_early_init(plat, true);
+	rc = sbi_platform_early_init(plat, TRUE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_hart_init(scratch, true);
+	rc = sbi_hart_init(scratch, TRUE);
 	if (rc)
 		sbi_hart_hang();
 
@@ -276,32 +267,41 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_pmu_init(scratch, true);
+	rc = sbi_pmu_init(scratch, TRUE);
 	if (rc)
 		sbi_hart_hang();
 
 	sbi_boot_print_banner(scratch);
 
-	rc = sbi_irqchip_init(scratch, true);
+    dump_pmps();
+
+	rc = sbi_platform_irqchip_init(plat, TRUE);
 	if (rc) {
-		sbi_printf("%s: irqchip init failed (error %d)\n",
+		sbi_printf("%s: platform irqchip init failed (error %d)\n",
 			   __func__, rc);
 		sbi_hart_hang();
 	}
 
-	rc = sbi_ipi_init(scratch, true);
+	rc = sbi_ipi_init(scratch, TRUE);
 	if (rc) {
 		sbi_printf("%s: ipi init failed (error %d)\n", __func__, rc);
 		sbi_hart_hang();
 	}
 
-	rc = sbi_tlb_init(scratch, true);
+	rc = sbi_tlb_init(scratch, TRUE);
 	if (rc) {
 		sbi_printf("%s: tlb init failed (error %d)\n", __func__, rc);
 		sbi_hart_hang();
 	}
 
-	rc = sbi_timer_init(scratch, true);
+	/* Penglai PMP init for synchronize PMP settings among Harts */
+	rc = sbi_pmp_init(scratch, TRUE);
+	if (rc) {
+		sbi_printf("%s: (penglai) pmp init failed (error %d)\n", __func__, rc);
+		sbi_hart_hang();
+	}
+
+	rc = sbi_timer_init(scratch, TRUE);
 	if (rc) {
 		sbi_printf("%s: timer init failed (error %d)\n", __func__, rc);
 		sbi_hart_hang();
@@ -326,6 +326,11 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 		sbi_hart_hang();
 	}
 
+	/*
+	 * Note (DD):
+	 * 	In our case, the PMP set by domain will be erased, as penglai
+	 * 	will take control of PMP
+	 * */
 	rc = sbi_hart_pmp_configure(scratch);
 	if (rc) {
 		sbi_printf("%s: PMP configure failed (error %d)\n",
@@ -333,11 +338,13 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 		sbi_hart_hang();
 	}
 
+    dump_pmps();
+
 	/*
 	 * Note: Platform final initialization should be last so that
 	 * it sees correct domain assignment and PMP configuration.
 	 */
-	rc = sbi_platform_final_init(plat, true);
+	rc = sbi_platform_final_init(plat, TRUE);
 	if (rc) {
 		sbi_printf("%s: platform final init failed (error %d)\n",
 			   __func__, rc);
@@ -350,72 +357,94 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 
 	sbi_boot_print_hart(scratch, hartid);
 
+	sbi_printf("[Penglai] Penglai Enclave Preparing\n");
+
 	wake_coldboot_harts(scratch, hartid);
 
 	init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
 	(*init_count)++;
 
-	sbi_hsm_hart_start_finish(scratch, hartid);
+	sbi_hsm_prepare_next_jump(scratch, hartid);
+	sbi_hart_switch_mode(hartid, scratch->next_arg1, scratch->next_addr,
+			     scratch->next_mode, FALSE);
 }
 
-static void __noreturn init_warm_startup(struct sbi_scratch *scratch,
-					 u32 hartid)
+static void init_warm_startup(struct sbi_scratch *scratch, u32 hartid)
 {
 	int rc;
 	unsigned long *init_count;
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
+    sbi_printf("[hart] hart %d in init_warm_startup\n", hartid);
 	if (!init_count_offset)
 		sbi_hart_hang();
 
-	rc = sbi_hsm_init(scratch, hartid, false);
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_hsm_init\n", hartid);
+	rc = sbi_hsm_init(scratch, hartid, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_platform_early_init(plat, false);
+    // here will be stall
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_platform_early_init\n", hartid);
+	rc = sbi_platform_early_init(plat, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_hart_init(scratch, false);
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_hart_init\n", hartid);
+	rc = sbi_hart_init(scratch, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_pmu_init(scratch, false);
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_pmu_init\n", hartid);
+	rc = sbi_pmu_init(scratch, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_irqchip_init(scratch, false);
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_platform_irqchip_init\n", hartid);
+	rc = sbi_platform_irqchip_init(plat, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_ipi_init(scratch, false);
+	rc = sbi_ipi_init(scratch, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_tlb_init(scratch, false);
+	rc = sbi_tlb_init(scratch, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_timer_init(scratch, false);
+	rc = sbi_pmp_init(scratch, FALSE);
+	if (rc) {
+		sbi_printf("%s: (penglai) pmp init failed (error %d)\n", __func__, rc);
+		sbi_hart_hang();
+	}
+
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_timer_init\n", hartid);
+	rc = sbi_timer_init(scratch, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
+	/*
+	 * Note (DD):
+	 * 	In our case, the PMP set by domain will be erased, as penglai
+	 * 	will take control of PMP
+	 * */
 	rc = sbi_hart_pmp_configure(scratch);
 	if (rc)
 		sbi_hart_hang();
 
-	rc = sbi_platform_final_init(plat, false);
+    sbi_printf("[hart] hart %d in init_warm_startup before sbi_timer_init\n", hartid);
+	rc = sbi_platform_final_init(plat, FALSE);
 	if (rc)
 		sbi_hart_hang();
 
 	init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
 	(*init_count)++;
 
-	sbi_hsm_hart_start_finish(scratch, hartid);
+	sbi_hsm_prepare_next_jump(scratch, hartid);
 }
 
-static void __noreturn init_warm_resume(struct sbi_scratch *scratch,
-					u32 hartid)
+static void init_warm_resume(struct sbi_scratch *scratch)
 {
 	int rc;
 
@@ -429,25 +458,66 @@ static void __noreturn init_warm_resume(struct sbi_scratch *scratch,
 	if (rc)
 		sbi_hart_hang();
 
-	sbi_hsm_hart_resume_finish(scratch, hartid);
+	sbi_hsm_hart_resume_finish(scratch);
 }
 
 static void __noreturn init_warmboot(struct sbi_scratch *scratch, u32 hartid)
 {
 	int hstate;
+    unsigned long saved_mie, cmip;
 
+    sbi_printf("[hart] hart %d init_warmboot. before wait for coldboot\n", hartid);
 	wait_for_coldboot(scratch, hartid);
 
 	hstate = sbi_hsm_hart_get_state(sbi_domain_thishart_ptr(), hartid);
-	if (hstate < 0)
+	if (hstate < 0) {
+        sbi_printf("[hart] hart %d hstate: %d. before hart hang\n", hartid, hstate);
 		sbi_hart_hang();
+    }
 
-	if (hstate == SBI_HSM_STATE_SUSPENDED) {
-		init_warm_resume(scratch, hartid);
+	if (hstate == SBI_HSM_STATE_SUSPENDED){
+        sbi_printf("[hart] hart %d before init_warm_resume\n", hartid);
+		init_warm_resume(scratch);
 	} else {
-		sbi_ipi_raw_clear(hartid);
+        sbi_printf("[hart] hart %d before init_warm_startup\n", hartid);
 		init_warm_startup(scratch, hartid);
-	}
+    }
+
+    /* Save MIE CSR */
+	saved_mie = csr_read(CSR_MIE);
+
+	/* Set MSIE bit to receive IPI */
+	csr_set(CSR_MIE, MIP_MSIP);
+
+    while (true) {
+        sbi_printf("[sbi_init_warmboot] hart%d is waiting for a MSIP interupt\n", hartid);
+
+        /* Qingyu: now just wait for an interupt */
+        while (true) {
+            sbi_printf("[sbi_init_warmboot] hart%d ready to enter wfi\n", hartid);
+            wfi();
+            cmip = csr_read(CSR_MIP);
+            if(cmip & MIP_MSIP){
+                sbi_printf("[sbi_init_warmboot] hart%d is waked by MSIP interupt, it's time to measure sec_linux\n", hartid);
+                break;
+            }
+        };
+
+        hash_sec_linux();
+        sbi_printf("[sbi_init_warmboot] Measuremant finished, it's time to verify the Cryper Certificate Struct\n");
+
+        // pass authentication
+        if(auth_sec_linux() == 0){
+            sbi_printf("[sbi_init_warmboot] Authenticate succeed, it's time to start sec_linux\n");
+            break;
+        }
+    }
+
+    csr_write(CSR_MIE, saved_mie);
+
+	sbi_hart_switch_mode(hartid, scratch->next_arg1,
+			     scratch->next_addr,
+			     scratch->next_mode, FALSE);
 }
 
 static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
@@ -466,9 +536,10 @@ static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
  */
 void __noreturn sbi_init(struct sbi_scratch *scratch)
 {
-	bool next_mode_supported	= false;
-	bool coldboot			= false;
+	bool next_mode_supported	= FALSE;
+	bool coldboot			= FALSE;
 	u32 hartid			= current_hartid();
+    int lottery     = atomic_xchg(&coldboot_lottery, 1);
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
 	if ((SBI_HARTMASK_MAX_BITS <= hartid) ||
@@ -477,15 +548,15 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 
 	switch (scratch->next_mode) {
 	case PRV_M:
-		next_mode_supported = true;
+		next_mode_supported = TRUE;
 		break;
 	case PRV_S:
 		if (misa_extension('S'))
-			next_mode_supported = true;
+			next_mode_supported = TRUE;
 		break;
 	case PRV_U:
 		if (misa_extension('U'))
-			next_mode_supported = true;
+			next_mode_supported = TRUE;
 		break;
 	default:
 		sbi_hart_hang();
@@ -501,19 +572,9 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 	 * HARTs which satisfy above condition.
 	 */
 
-	if (sbi_platform_cold_boot_allowed(plat, hartid)) {
-		if (next_mode_supported &&
-		    atomic_xchg(&coldboot_lottery, 1) == 0)
-			coldboot = true;
-	}
-
-	/*
-	 * Do platform specific nascent (very early) initialization so
-	 * that platform can initialize platform specific per-HART CSRs
-	 * or per-HART devices.
-	 */
-	if (sbi_platform_nascent_init(plat))
-		sbi_hart_hang();
+    /* We use hart0 to be coldboot hart */
+	if (next_mode_supported && hartid == 0 && (lottery == 0 || lottery != 0))
+		coldboot = TRUE;
 
 	if (coldboot)
 		init_coldboot(scratch, hartid);
@@ -563,7 +624,7 @@ void __noreturn sbi_exit(struct sbi_scratch *scratch)
 
 	sbi_ipi_exit(scratch);
 
-	sbi_irqchip_exit(scratch);
+	sbi_platform_irqchip_exit(plat);
 
 	sbi_platform_final_exit(plat);
 

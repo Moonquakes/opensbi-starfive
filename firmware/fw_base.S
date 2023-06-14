@@ -128,9 +128,9 @@ _relocate:
 	REG_L	t1, 0(t1)
 	lla	t2, _load_start
 	REG_L	t2, 0(t2)
-	beq	t0, t2, _relocate_done
 	sub	t3, t1, t0
 	add	t3, t3, t2
+	beq	t0, t2, _relocate_done
 	lla	t4, _relocate_done
 	sub	t4, t4, t2
 	add	t4, t4, t0
@@ -259,7 +259,7 @@ _bss_zero:
 	 * s8 -> HART Stack Size
 	 */
 	lla	a4, platform
-#if __riscv_xlen > 32
+#if __riscv_xlen == 64
 	lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
 	lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
 #else
@@ -298,12 +298,6 @@ _scratch_init:
 	sub	a5, t3, a4
 	REG_S	a4, SBI_SCRATCH_FW_START_OFFSET(tp)
 	REG_S	a5, SBI_SCRATCH_FW_SIZE_OFFSET(tp)
-
-	/* Store R/W section's offset in scratch space */
-	lla	a4, __fw_rw_offset
-	REG_L	a5, 0(a4)
-	REG_S	a5, SBI_SCRATCH_FW_RW_OFFSET(tp)
-
 	/* Store next arg1 in scratch space */
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_next_arg1
@@ -428,15 +422,9 @@ _start_warm:
 	li	ra, 0
 	call	_reset_regs
 
-	/* Disable all interrupts */
+	/* Disable and clear all interrupts */
 	csrw	CSR_MIE, zero
-	/*
-	 * Only clear the MIP_SSIP and MIP_STIP. For the platform like QEMU,
-	 * If we clear other interrupts like MIP_SEIP and the pendings of
-	 * PLIC still exist, the QEMU may not set it back immediately.
-	 */
-	li	t0, (MIP_SSIP | MIP_STIP)
-	csrc	CSR_MIP, t0
+	csrw	CSR_MIP, zero
 
 	/* Find HART count and HART stack size */
 	lla	a4, platform
@@ -531,8 +519,6 @@ _link_start:
 	RISCV_PTR	FW_TEXT_START
 _link_end:
 	RISCV_PTR	_fw_reloc_end
-__fw_rw_offset:
-	RISCV_PTR	_fw_rw_start - _fw_start
 
 	.section .entry, "ax", %progbits
 	.align 3

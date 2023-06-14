@@ -12,10 +12,10 @@ ENTRY(_start)
 
 SECTIONS
 {
-#ifdef FW_PAYLOAD_OFFSET
-	. = FW_TEXT_START + FW_PAYLOAD_OFFSET;
+#ifdef FW_TEST_PAYLOAD_OFFSET
+	. = FW_TEXT_START + FW_TEST_PAYLOAD_OFFSET;
 #else
-	. = ALIGN(FW_PAYLOAD_ALIGN);
+	. = ALIGN(FW_TEST_PAYLOAD_ALIGN);
 #endif
 
 	PROVIDE(_payload_start = .);
@@ -33,11 +33,13 @@ SECTIONS
 		PROVIDE(_text_end = .);
 	}
 
-	/* End of the code sections */
-
 	. = ALIGN(0x1000); /* Ensure next section is page aligned */
 
+	/* End of the code sections */
+
 	/* Beginning of the read-only data sections */
+
+	. = ALIGN(0x1000); /* Ensure next section is page aligned */
 
 	.rodata :
 	{
@@ -49,9 +51,9 @@ SECTIONS
 
 	/* End of the read-only data sections */
 
-	. = ALIGN(0x1000); /* Ensure next section is page aligned */
-
 	/* Beginning of the read-write data sections */
+
+	. = ALIGN(0x1000); /* Ensure next section is page aligned */
 
 	.data :
 	{
